@@ -327,10 +327,483 @@ LOG("yt_extras OK (version %s, xml=%s, concurrent=%s)" %
      getattr(YX, "HAS_CONCURRENT", "?")))
 
 
-SCREEN_WIDTH = 640
+# ----------------------------------------------------------------------------
+# v0.3.8/0.3.9: device profile (device.txt) + ADAPTATIVE screen geometry.
+#
+# The app is not locked to 640x480: the window opens at the device's
+# REAL native resolution and everything renders through a logical
+# coordinate system derived from it (640x480 design grid -> scaled up, so
+# 4:3 screens scale 1:1 in aspect, 16:9/1:1 screens get a wider/taller
+# logical layout instead of letterbox bars). A human-readable,
+# hand-editable device.txt is (re)written every boot:
+#   - the AUTO block (detected values) is refreshed by the app
+#   - the USER block (commented examples) is preserved verbatim
+#
+# v0.3.9 CRITICAL RULE (black-screen regression fix): this module must
+# NEVER touch the SDL video subsystem at import time. v0.3.8 called
+# SDL_Init(SDL_INIT_VIDEO) here to probe the desktop mode and, together
+# with the v0.3.8 FULLSCREEN_DESKTOP window, that left several KMSDRM
+# builds presenting a dead surface (app fully alive, panel black - the
+# 0.3.8 field report on a 640x480 R36S-class device). SDL is now
+# initialised exactly ONCE, inside PilasTubeApp.__init__, exactly like
+# v0.3.7; the import-time probe reads the framebuffer sysfs instead, and
+# the app calls utils.refresh_geometry() after SDL_Init if SDL knows
+# better.
+# ----------------------------------------------------------------------------
+DEVICE_FILE = os.path.join(SCRIPT_DIR, "device.txt")
+
+_USER_BLOCK_MARK = "# ---- user overrides"
 
 
-SCREEN_HEIGHT = 480
+def _probe_fb_size():
+    """Framebuffer size via sysfs ("1024,768") - launcher-era fallback."""
+    try:
+        raw = open("/sys/class/graphics/fb0/virtual_size").read().strip()
+        w, h = [int(v) for v in raw.split(",")]
+        if 320 <= w <= 4096 and 240 <= h <= 4096:
+            return w, h
+    except Exception:
+        pass
+    try:
+        raw = open("/sys/class/graphics/fb0/mode").read().strip()
+        # "a:1024x768r-60" style
+        if "x" in raw:
+            body = raw.split(":")[-1].split("r")[0]
+            w, h = [int(v) for v in body.split("x")[:2]]
+            if 320 <= w <= 4096 and 240 <= h <= 4096:
+                return w, h
+    except Exception:
+        pass
+    return None
+
+
+def _probe_device_name():
+    for p in ("/sys/firmware/devicetree/base/model",):
+        try:
+            s = open(p, "rb").read(128).replace(b"\x00", b" ").decode(
+                "utf-8", "replace").strip()
+            if s:
+                return s[:40]
+        except Exception:
+            pass
+    env = os.environ.get("DEVICE") or os.environ.get("param_device")
+    if env:
+        return str(env)[:40]
+    return "PortMaster handheld"
+
+
+def _probe_firmware():
+    try:
+        for line in open("/etc/os-release"):
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')[:40]
+    except Exception:
+        pass
+    return "unknown"
+
+
+class DeviceProfile(object):
+    """key=value parser/writer for device.txt (auto block + user block)."""
+
+    @staticmethod
+    def load(path):
+        data = {}
+        try:
+            for line in open(path):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                data[k.strip()] = v.strip()
+        except Exception:
+            pass
+        return data
+
+    @staticmethod
+    def load_user(path):
+        """key=value pairs from BELOW the user-override marker only.
+
+        v0.3.9: the auto block's ui_scale line holds the COMPUTED value
+        and must never be re-read as a user pin (feedback loop that
+        froze the old scale after a resolution change). Only lines the
+        user actually wrote in the override block count as overrides.
+        """
+        data = {}
+        try:
+            in_user = False
+            for line in open(path):
+                if line.startswith(_USER_BLOCK_MARK):
+                    in_user = True
+                    continue
+                if not in_user:
+                    continue
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                data[k.strip()] = v.strip()
+        except Exception:
+            pass
+        return data
+
+    @staticmethod
+    def write(path, auto_fields, source="launcher"):
+        """(Re)write device.txt: fresh auto block + template user block.
+
+        Any user block from an existing file is preserved verbatim (the
+        user may have uncommented/edited override lines by hand).
+        """
+        user_lines = []
+        try:
+            in_user = False
+            for line in open(path):
+                if line.startswith(_USER_BLOCK_MARK):
+                    in_user = True
+                if in_user:
+                    user_lines.append(line.rstrip("\n"))
+        except Exception:
+            pass
+        if not user_lines:
+            user_lines = [
+                _USER_BLOCK_MARK + " (uncomment a line to change it)",
+                "#force_screen_width=640",
+                "#force_screen_height=480",
+                "#ui_scale=1.5",
+                "#scale_mode=fit",
+            ]
+        lines = [
+            "# ==========================================================",
+            "#  PilasTube device profile (auto-generated)",
+            "#",
+            "#  AUTO BLOCK: detected values, refreshed at every boot.",
+            "#  USER BLOCK (bottom): uncomment to override - examples:",
+            "#    force_screen_width/height : window size (e.g. 640x480)",
+            "#    ui_scale  : UI zoom (1.0 = design size; bigger = smaller",
+            "#                UI on big screens; auto = fill the screen)",
+            "#    scale_mode: fit  = keep proportions (default)",
+            "#                fill = stretch the UI edge to edge",
+            "# ==========================================================",
+            "device_name=%s" % auto_fields.get("device_name", "?"),
+            "firmware=%s" % auto_fields.get("firmware", "?"),
+            "kernel=%s" % auto_fields.get("kernel", "?"),
+            "cpu=%s" % auto_fields.get("cpu", "?"),
+            "video_driver=%s" % auto_fields.get("video_driver", "?"),
+            "native_width=%s" % auto_fields.get("native_width", 640),
+            "native_height=%s" % auto_fields.get("native_height", 480),
+            "ui_scale=%s" % auto_fields.get("ui_scale", 1.0),
+            "screen_width=%s" % auto_fields.get("screen_width", 640),
+            "screen_height=%s" % auto_fields.get("screen_height", 480),
+            "scale_mode=%s" % auto_fields.get("scale_mode", "fit"),
+            "source=%s" % source,
+            "updated=%s" % time.strftime("%Y-%m-%d %H:%M:%S"),
+            "",
+        ] + user_lines + [""]
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                with open(path, "w") as f:
+                    f.write("\n".join(lines) + "\n")
+            except Exception:
+                pass
+
+
+def _detect_native_size():
+    """(w, h, source) - framebuffer sysfs, then 640x480 default.
+
+    v0.3.9: NO SDL calls here (see the v0.3.9 rule in the header above).
+    On PortMaster handhelds /sys/class/graphics/fb0 reports the true
+    panel size; the launcher's device.txt writer uses the same probe.
+    The test harness can override it with PT_MOCK_DISPLAY=WxH (the same
+    variable mock_sdl2 understands, so the import-time probe and the
+    mock's SDL_GetDesktopDisplayMode always agree).
+    """
+    try:
+        _m = str(os.environ.get("PT_MOCK_DISPLAY", "")).lower()
+        for _sep in ("x", ",", "*", " "):
+            if _sep in _m:
+                _parts = _m.split(_sep)
+                _w, _h = int(_parts[0]), int(_parts[1])
+                if 320 <= _w <= 4096 and 240 <= _h <= 4096:
+                    return _w, _h, "mock"
+    except Exception:
+        pass
+    fb = _probe_fb_size()
+    if fb:
+        return fb[0], fb[1], "fb"
+    return 640, 480, "default"
+
+
+# ---- geometry computation (shared by import time + v0.3.9 refresh) -----------
+_GEO_ATTRS = ("NATIVE_WIDTH", "NATIVE_HEIGHT", "SCREEN_WIDTH",
+              "SCREEN_HEIGHT", "WINDOW_WIDTH", "WINDOW_HEIGHT",
+              "UI_SCALE", "SCALE_MODE", "FILL_SCALE_X", "FILL_SCALE_Y")
+
+
+def _read_profile_overrides(profile, path=None):
+    """(scale_mode, force_w, force_h, pinned_ui_scale) - device.txt user
+    block values, all optional, all validated.
+
+    v0.3.9: when device.txt carries the USER BLOCK marker (every file
+    the app or launcher writes does), the ui_scale pin is honoured ONLY
+    from below the marker - the auto block's ui_scale line is the
+    computed value and re-reading it as a pin created a feedback loop
+    that froze the old scale after refresh_geometry() corrected the
+    resolution. Bare hand-made files without the marker still honour
+    any line (v0.3.8 compatibility). scale_mode / force_* are safe to
+    read flat (their auto-block values always equal the user's choice).
+    """
+    scale_mode = str(profile.get("scale_mode", "")).strip().lower()
+    if scale_mode not in ("fit", "fill"):
+        scale_mode = "fit"
+    fw, fh = 0, 0
+    try:
+        fw = int(profile.get("force_screen_width", "0") or 0)
+        fh = int(profile.get("force_screen_height", "0") or 0)
+    except ValueError:
+        fw, fh = 0, 0
+    if not (320 <= fw <= 4096 and 240 <= fh <= 4096):
+        fw, fh = 0, 0
+    pinned = 0.0
+    try:
+        pinned = float(profile.get("ui_scale", "0") or 0)
+    except ValueError:
+        pinned = 0.0
+    if path:
+        try:
+            with open(path) as _f:
+                _raw = _f.read()
+            if _USER_BLOCK_MARK in _raw:
+                _ub = DeviceProfile.load_user(path)
+                try:
+                    pinned = float(_ub.get("ui_scale", "0") or 0)
+                except ValueError:
+                    pinned = 0.0
+        except Exception:
+            pass
+    return scale_mode, fw, fh, pinned
+
+
+def _compute_geometry(native_w, native_h, scale_mode, fw, fh, pinned):
+    """The v0.3.8 adaptive rules (unchanged in v0.3.9).
+
+    fit  -> logical = native / UI_SCALE, SAME aspect as the panel: 4:3
+            screens render the 640x480 design grid exactly; 16:9 screens
+            get a WIDER logical layout; 1:1 screens a TALLER one. No
+            letterbox bars - the layout itself adapts.
+    fill -> 640x480 stretched edge to edge (SDL_RenderSetScale).
+    UI_SCALE = min(native/640, native/480) (>= 1.0), user-pinnable.
+    """
+    if fw and fh:
+        # the user forced a window size (device.txt) - honour it
+        native_w, native_h = fw, fh
+    auto_scale = min(native_w / 640.0, native_h / 480.0)
+    if auto_scale < 1.0:
+        auto_scale = 1.0
+    if not (1.0 <= pinned <= auto_scale):
+        pinned = auto_scale
+    ui_scale = pinned
+    if scale_mode == "fill":
+        # stretch the 640x480 design edge to edge (no bars, some
+        # distortion)
+        screen_w, screen_h = 640, 480
+        fill_x = native_w / 640.0
+        fill_y = native_h / 480.0
+        ui_scale = min(fill_x, fill_y)
+    else:
+        screen_w = max(640, int(round(native_w / ui_scale)))
+        screen_h = max(480, int(round(native_h / ui_scale)))
+        fill_x = fill_y = None
+    return {
+        "native_w": int(native_w), "native_h": int(native_h),
+        "screen_w": int(screen_w), "screen_h": int(screen_h),
+        "window_w": int(native_w), "window_h": int(native_h),
+        "ui_scale": float(ui_scale), "scale_mode": scale_mode,
+        "fill_x": fill_x, "fill_y": fill_y,
+    }
+
+
+def _apply_geometry(geo):
+    """Write a _compute_geometry() result into this module's globals AND
+    the by-value copies already imported into ui/player/auth/PilasTube
+    (those modules import the constants before the app exists - v0.3.9
+    refreshes them in place so a late geometry correction propagates
+    everywhere before the first frame is drawn)."""
+    global NATIVE_WIDTH, NATIVE_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT
+    global WINDOW_WIDTH, WINDOW_HEIGHT, UI_SCALE, SCALE_MODE
+    global FILL_SCALE_X, FILL_SCALE_Y
+    NATIVE_WIDTH = geo["native_w"]
+    NATIVE_HEIGHT = geo["native_h"]
+    SCREEN_WIDTH = geo["screen_w"]
+    SCREEN_HEIGHT = geo["screen_h"]
+    WINDOW_WIDTH = geo["window_w"]
+    WINDOW_HEIGHT = geo["window_h"]
+    UI_SCALE = geo["ui_scale"]
+    SCALE_MODE = geo["scale_mode"]
+    FILL_SCALE_X = geo["fill_x"]
+    FILL_SCALE_Y = geo["fill_y"]
+    for _mod_name in ("ui", "player", "auth", "PilasTube"):
+        _mod = sys.modules.get(_mod_name)
+        if _mod is None:
+            continue
+        for _attr in _GEO_ATTRS:
+            if hasattr(_mod, _attr):
+                try:
+                    setattr(_mod, _attr, globals()[_attr])
+                except Exception:
+                    pass
+
+
+def _current_video_driver():
+    """Name of the active SDL video driver ("" before SDL_Init - a pure
+    query, never initialises anything)."""
+    try:
+        _vd = SDL_GetCurrentVideoDriver()
+        if _vd:
+            return _vd.decode("utf-8", "replace")
+    except Exception:
+        pass
+    return ""
+
+
+def refresh_geometry(sdl_w, sdl_h):
+    """v0.3.9: re-probe the panel size AFTER the app initialised SDL.
+
+    Called by PilasTubeApp.__init__ right after SDL_Init and BEFORE the
+    window is created. If the SDL desktop mode disagrees with the
+    import-time framebuffer probe (dev machines without fb0, exotic or
+    rotated panels), the whole geometry is recomputed and pushed into
+    every module + device.txt AUTO block. User overrides
+    (force_screen_width/height, pinned ui_scale) are honoured exactly
+    like at import time. Returns True when the geometry changed - on
+    real handhelds the probes agree and this is a no-op.
+    """
+    try:
+        sdl_w = int(sdl_w or 0)
+        sdl_h = int(sdl_h or 0)
+    except (TypeError, ValueError):
+        return False
+    if not (320 <= sdl_w <= 4096 and 240 <= sdl_h <= 4096):
+        return False
+    if sdl_w == NATIVE_WIDTH and sdl_h == NATIVE_HEIGHT:
+        return False
+    prof = DeviceProfile.load(DEVICE_FILE)
+    scale_mode, fw, fh, pinned = _read_profile_overrides(prof, DEVICE_FILE)
+    if fw and fh:
+        # the user forced a window size - the SDL mode never wins
+        return False
+    geo = _compute_geometry(sdl_w, sdl_h, scale_mode, fw, fh, pinned)
+    _apply_geometry(geo)
+    try:
+        DeviceProfile.write(DEVICE_FILE, {
+            "device_name": _probe_device_name(),
+            "firmware": _probe_firmware(),
+            "kernel": os.uname().release if hasattr(os, "uname") else "?",
+            "cpu": _py_machine(),
+            "video_driver": _current_video_driver() or "sdl",
+            "native_width": geo["native_w"],
+            "native_height": geo["native_h"],
+            "ui_scale": ("%.2f" % geo["ui_scale"]),
+            "screen_width": geo["screen_w"],
+            "screen_height": geo["screen_h"],
+            "scale_mode": geo["scale_mode"],
+        }, source="sdl")
+    except Exception:
+        pass
+    LOG("geometry refreshed from SDL desktop mode: native=%dx%d "
+        "logical=%dx%d scale=%.2f mode=%s window=%dx%d" %
+        (geo["native_w"], geo["native_h"], geo["screen_w"], geo["screen_h"],
+         geo["ui_scale"], geo["scale_mode"], geo["window_w"],
+         geo["window_h"]), "SDL")
+    return True
+
+
+def apply_logical_mapping(renderer):
+    """v0.3.9: map the logical coordinate grid onto the physical window.
+
+    fit  -> SDL_RenderSetLogicalSize (aspect-preserving; logical and
+            native share the aspect so there are no bars)
+    fill -> SDL_RenderSetScale (stretch edge to edge)
+
+    Applied ONLY when the logical grid actually differs from the window
+    (fill mode, or a non-640x480-panel): 640x480 devices take the exact
+    v0.3.7 render path (no logical-size call, no scale-quality hint) -
+    the identity mapping is implicit. The linear-quality hint must be
+    set before the first texture is created, which is why this runs
+    right after renderer creation (and again after the player rebuilds
+    the renderer around an external player). Returns True when a
+    mapping was applied.
+    """
+    if not renderer:
+        return False
+    try:
+        if (SCREEN_WIDTH == WINDOW_WIDTH and
+                SCREEN_HEIGHT == WINDOW_HEIGHT and SCALE_MODE != "fill"):
+            return False
+        _set_hint = getattr(sdl2, "SDL_SetHint", None)
+        if _set_hint:
+            try:
+                _set_hint(b"SDL_RENDER_SCALE_QUALITY", b"1")
+            except Exception:
+                pass
+        if SCALE_MODE == "fill":
+            _rss = getattr(sdl2, "SDL_RenderSetScale", None)
+            if _rss and FILL_SCALE_X and FILL_SCALE_Y:
+                _rss(renderer, FILL_SCALE_X, FILL_SCALE_Y)
+                return True
+        else:
+            _rsl = getattr(sdl2, "SDL_RenderSetLogicalSize", None)
+            if _rsl:
+                _rsl(renderer, SCREEN_WIDTH, SCREEN_HEIGHT)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# ---- compute the actual geometry for this boot (NO SDL - see header) ---------
+_prof = DeviceProfile.load(DEVICE_FILE)
+
+_scale_mode, _fw, _fh, _pinned = _read_profile_overrides(_prof, DEVICE_FILE)
+
+NATIVE_WIDTH, NATIVE_HEIGHT, _geo_source = _detect_native_size()
+
+_apply_geometry(_compute_geometry(NATIVE_WIDTH, NATIVE_HEIGHT,
+                                  _scale_mode, _fw, _fh, _pinned))
+
+_vid_drv = _current_video_driver()
+
+LOG("geometry: native=%dx%d (%s) logical=%dx%d scale=%.2f mode=%s "
+    "window=%dx%d" % (NATIVE_WIDTH, NATIVE_HEIGHT, _geo_source,
+                      SCREEN_WIDTH, SCREEN_HEIGHT, UI_SCALE, SCALE_MODE,
+                      WINDOW_WIDTH, WINDOW_HEIGHT), "SDL")
+
+# refresh device.txt (auto block) every boot; preserve the user block
+# v0.3.9: no SDL at import any more, so the video driver written here is
+# the previous boot's value (or the probe source on a fresh install);
+# utils.refresh_geometry() overwrites it with the real SDL driver name
+# right after the app initialises SDL.
+try:
+    DeviceProfile.write(DEVICE_FILE, {
+        "device_name": _probe_device_name(),
+        "firmware": _probe_firmware(),
+        "kernel": os.uname().release if hasattr(os, "uname") else "?",
+        "cpu": _py_machine(),
+        "video_driver": (_vid_drv or
+                         str(_prof.get("video_driver", "") or "").strip() or
+                         _geo_source),
+        "native_width": NATIVE_WIDTH,
+        "native_height": NATIVE_HEIGHT,
+        "ui_scale": ("%.2f" % UI_SCALE),
+        "screen_width": SCREEN_WIDTH,
+        "screen_height": SCREEN_HEIGHT,
+        "scale_mode": SCALE_MODE,
+    }, source=_geo_source)
+except Exception:
+    pass
 
 
 APP_TITLE = "PilasTube"
@@ -453,6 +926,13 @@ TRANSLATIONS = {
         "msg_play_all": "Playing rest of list", "msg_no_channel": "No channel info",
         "msg_skipped": "Skipped", "msg_next": "Up next",
         "msg_updating": "Updating yt-dlp...", "msg_update_ok": "yt-dlp updated",
+        "update_title": "yt-dlp update available",
+        "update_current": "Current version",
+        "update_latest": "Latest version",
+        "update_ask": "Update now?",
+        "update_yes": "Yes - update now", "update_no": "No - skip",
+        "update_skipped": "Update skipped (Settings > Network anytime)",
+        "update_offline": "Update check skipped (offline)",
         "msg_sb_off": "SponsorBlock off", "msg_empty_subs": "No subscriptions yet",
         "msg_subs_hint": "Open a video > START > Subscribe",
         "help_keyboard": "A:Type  B:Close  SUG:Tips  START:Search  Y:Del",
@@ -592,6 +1072,13 @@ TRANSLATIONS = {
         "msg_play_all": "Tocando resto da lista", "msg_no_channel": "Sem info do canal",
         "msg_skipped": "Pulado", "msg_next": "A seguir",
         "msg_updating": "Atualizando yt-dlp...", "msg_update_ok": "yt-dlp atualizado",
+        "update_title": "Atualizacao do yt-dlp disponivel",
+        "update_current": "Versao atual",
+        "update_latest": "Versao nova",
+        "update_ask": "Atualizar agora?",
+        "update_yes": "Sim - atualizar agora", "update_no": "Nao - pular",
+        "update_skipped": "Atualizacao pulada (Config > Rede a qualquer hora)",
+        "update_offline": "Verificacao pulada (sem conexao)",
         "msg_sb_off": "SponsorBlock desligado", "msg_empty_subs": "Sem inscricoes ainda",
         "msg_subs_hint": "Abra um video > START > Inscrever",
         "help_keyboard": "A:Digitar  B:Fechar  SUG:Dicas  START:Buscar  Y:Apagar",

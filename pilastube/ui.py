@@ -39,6 +39,7 @@ from utils import (
     NAV_SUBS,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
+    UI_SCALE,
     SCRIPT_DIR,
     SDL_CONTROLLERBUTTONDOWN,
     SDL_Color,
@@ -280,7 +281,18 @@ class UIMixin(object):
             self.text_cache[key] = (texture, w, h)
         tex, w, h = self.text_cache[key]
         if tex:
-            SDL_RenderCopy(self.renderer, tex, None, SDL_Rect(int(x), int(y), w, h))
+            # v0.3.8: fonts are rasterised at PHYSICAL size (design x
+            # UI_SCALE) - divide the destination back to LOGICAL layout
+            # coordinates so every existing position/size math is
+            # unchanged while the glyphs stay pixel-crisp at native res.
+            sc = UI_SCALE if UI_SCALE and UI_SCALE > 1.0 else 1.0
+            dw, dh = w, h
+            if sc != 1.0:
+                dw = max(1, int(round(w / sc)))
+                dh = max(1, int(round(h / sc)))
+            SDL_RenderCopy(self.renderer, tex, None,
+                           SDL_Rect(int(x), int(y), dw, dh))
+            return dw
         return w
 
     def draw_text_centered(self, text, cx, y, color=None, font=None):
@@ -327,9 +339,65 @@ class UIMixin(object):
             self.render_video_info()
         elif self.queue_open:
             self.render_queue_screen()
+        # v0.3.8: the yt-dlp update popup sits above everything else
+        # (it only ever opens on an idle main UI)
+        if self.update_popup is not None:
+            self._render_update_popup()
         SDL_RenderPresent(self.renderer)
         self.need_redraw = False
         self.frame_count += 1
+
+    def _render_update_popup(self):
+        """v0.3.8: yt-dlp update offer - SmartTube-style Yes/No dialog.
+
+        LEFT/RIGHT move the focus, A confirms, B = No. Yes runs the real
+        updater (the settings action); No dismisses until next launch.
+        """
+        p = self.update_popup or {}
+        box_w = 330
+        box_h = 190
+        box_x = (SCREEN_WIDTH - box_w) // 2
+        box_y = max(40, (SCREEN_HEIGHT - box_h) // 2 - 16)
+        # scrim + card
+        self.draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, (0, 0, 0), 150)
+        self.draw_rect(box_x, box_y, box_w, box_h, self.C.CARD_BG)
+        self.draw_rect(box_x, box_y, box_w, 3, self.C.YT_RED)
+        # header
+        self.draw_text(self.t("update_title")[:30], box_x + 14, box_y + 12,
+                       self.C.TEXT_PRIMARY, self.font_small)
+        # version rows
+        self.draw_text("%s:" % self.t("update_current"), box_x + 14,
+                       box_y + 44, self.C.TEXT_SECONDARY, self.font_small)
+        self.draw_text(str(p.get("current", "?"))[:20], box_x + 150,
+                       box_y + 44, self.C.TEXT_PRIMARY, self.font_small)
+        self.draw_text("%s:" % self.t("update_latest"), box_x + 14,
+                       box_y + 64, self.C.TEXT_SECONDARY, self.font_small)
+        self.draw_text(str(p.get("latest", "?"))[:20], box_x + 150,
+                       box_y + 64, self.C.STATUS_LOADING, self.font_small)
+        self.draw_text(self.t("update_ask"), box_x + 14, box_y + 90,
+                       self.C.TEXT_PRIMARY, self.font)
+        # Yes / No buttons
+        choice = p.get("choice", 0)
+        bw, bh, gap = 140, 34, 18
+        by = box_y + box_h - 52
+        bx1 = box_x + (box_w - bw * 2 - gap) // 2
+        bx2 = bx1 + bw + gap
+        for i, (bx, label) in enumerate(((bx1, "update_yes"),
+                                         (bx2, "update_no"))):
+            sel = (i == choice)
+            self.draw_rect(bx, by, bw, bh,
+                           self.C.CARD_SELECTED if sel else self.C.BG_TERTIARY)
+            if sel:
+                self.draw_rect(bx, by + bh - 3, bw, 3, self.C.YT_RED)
+            self.draw_text_centered(self.t(label), bx + bw // 2, by + 10,
+                                    self.C.TEXT_PRIMARY if sel
+                                    else self.C.TEXT_SECONDARY,
+                                    self.font_small)
+        # hint line
+        self.draw_text("< > : %s/%s   A: OK   B: %s" % (
+            self.t("update_yes")[:10], self.t("update_no")[:8],
+            self.t("update_no")[:8]), box_x + 14, box_y + box_h - 22,
+            self.C.TEXT_TERTIARY, self.font_tiny)
 
     def render_offline_overlay(self):
         """v3.6: WiFi dropped - 'Reconnecting...' panel with a live attempt

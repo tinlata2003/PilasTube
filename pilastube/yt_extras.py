@@ -52,7 +52,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PREFS_FILE = os.path.join(SCRIPT_DIR, "u_preferences.txt")
 
 APP_NAME = "PilasTube"
-APP_VERSION = "0.3.7"
+APP_VERSION = "0.3.9"
 
 # Lenient SSL context - handheld firmwares often carry outdated CA bundles.
 # (Same behaviour as v1 of the app; only used for read-only public APIs.)

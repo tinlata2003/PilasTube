@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-#  PilasTube v0.3.7 - PortMaster Launch Script
+#  PilasTube v0.3.9 - PortMaster Launch Script
 #  YouTube client for handhelds (SmartTube-inspired).
 #
 #  v0.3.5: the app is modular - six modules live in pilastube/:
@@ -16,6 +16,21 @@
 #    recommendations, subscriptions and history work again) + the
 #    DDLC-style terminal boot screen (Loading... Please Wait. + PILAS
 #    logo + star art on /dev/tty0, failure/restart messages, signals).
+#  v0.3.8: ADAPTATIVE resolution (the window opens at the real native
+#    panel size - 4:3 scales exactly, 16:9 gets a wider layout, 1:1 a
+#    taller one; video decodes at physical resolution; fonts stay crisp),
+#    first-boot device.txt (device info + resolution, hand-editable:
+#    force_screen/ui_scale/scale_mode overrides) + background yt-dlp
+#    update check with a gamepad Yes/No popup on every app open.
+#  v0.3.9: black-screen fix - the 0.3.8 window flag combo
+#    (FULLSCREEN_DESKTOP at position 0,0 + SDL video init at module
+#    import) presented a dead surface on several KMSDRM builds: the
+#    app ran, input worked, the panel stayed black. v0.3.9 restores
+#    the v0.3.7-proven init sequence (SDL_WINDOW_SHOWN + CENTERED,
+#    SDL initialised exactly once inside the app) at the NATIVE panel
+#    size, keeps every 0.3.8 feature (adaptive geometry, device.txt,
+#    yt-dlp update popup) and adds window/renderer diagnostics to
+#    detailed.txt.
 #
 #  Hardened launch path with full logging:
 #    - absolute paths derived from this script's own location
@@ -106,6 +121,62 @@ EOF
 pm_tty_failed() {                  # crash exit message (DDLC failure path)
     pm_tty_message "PilasTube failed." \
                    "Check pilastube/logs/detailed.txt."
+}
+
+# v0.3.8: first-boot device profile - device.txt is written HERE, while
+# the terminal loading screen is running (the app refines the auto block
+# with SDL's authoritative values afterwards and NEVER overwrites the
+# user block). Existing (possibly user-edited) files are left alone.
+pm_write_device_txt() {
+    local f="$APP_DIR/device.txt"
+    [ -f "$f" ] && return 0
+    local fw fh fbrc
+    fw="$(cut -d, -f1 /sys/class/graphics/fb0/virtual_size 2>/dev/null || true)"
+    fh="$(cut -d, -f2 /sys/class/graphics/fb0/virtual_size 2>/dev/null || true)"
+    case "$fw" in ''|*[!0-9]*) fw=640;; esac
+    case "$fh" in ''|*[!0-9]*) fh=480;; esac
+    local dname="PortMaster handheld"
+    [ -r /sys/firmware/devicetree/base/model ] && \
+        dname="$(tr -d '\000' < /sys/firmware/devicetree/base/model | head -c 40)"
+    [ -n "${DEVICE:-}" ] && dname="$DEVICE"
+    local fwname="unknown"
+    if [ -r /etc/os-release ]; then
+        fwname="$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+    fi
+    fbrc="$(uname -r 2>/dev/null || echo '?')"
+    {
+        echo "# =========================================================="
+        echo "#  PilasTube device profile (auto-generated)"
+        echo "#"
+        echo "#  AUTO BLOCK: detected values, refreshed at every boot."
+        echo "#  USER BLOCK (bottom): uncomment to override - examples:"
+        echo "#    force_screen_width/height : window size (e.g. 640x480)"
+        echo "#    ui_scale  : UI zoom (1.0 = design size; bigger = smaller"
+        echo "#                UI on big screens; auto = fill the screen)"
+        echo "#    scale_mode: fit  = keep proportions (default)"
+        echo "#                fill = stretch the UI edge to edge"
+        echo "# =========================================================="
+        echo "device_name=$dname"
+        echo "firmware=$fwname"
+        echo "kernel=$fbrc"
+        echo "cpu=$(uname -m 2>/dev/null || echo '?')"
+        echo "video_driver=launcher-fb"
+        echo "native_width=$fw"
+        echo "native_height=$fh"
+        echo "ui_scale=auto"
+        echo "screen_width=$fw"
+        echo "screen_height=$fh"
+        echo "scale_mode=fit"
+        echo "source=launcher"
+        echo "updated=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        echo "# ---- user overrides (uncomment a line to change it)"
+        echo "#force_screen_width=640"
+        echo "#force_screen_height=480"
+        echo "#ui_scale=1.5"
+        echo "#scale_mode=fit"
+    } > "$f" 2>/dev/null || true
+    LOG "device.txt written on first boot (${fw}x${fh}, fb probe)"
 }
 
 # rotate logs if they grew too big (keep one previous generation)
@@ -289,6 +360,10 @@ cd "$APP_DIR" || {
 # the screen (DDLC phase 5: the player sees "Loading... Please Wait." +
 # the compact PILAS logo while the SDL window opens)
 pm_tty_splash
+
+# v0.3.8: write the first-boot device profile while the splash is on
+# screen (the app refreshes the auto block every boot)
+pm_write_device_txt
 
 ${RUN_CMD:-} python3 -u "$APP_DIR/PilasTube.py" >> "$DETAILED" 2>&1
 RC=$?

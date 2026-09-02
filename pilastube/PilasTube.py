@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PilasTube v3.5 - PilasTube.py (application core)
+PilasTube v0.3.9 - PilasTube.py (application core)
 
 App state and lifecycle: __init__, preferences/JSON stores, history and
 resume positions, the first-boot wizard, every data loader (recommended
@@ -55,8 +55,14 @@ from utils import (
     NAV_SUBS,
     PLog,
     QUALITY_OPTIONS,
+    SCALE_MODE,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
+    FILL_SCALE_X,
+    FILL_SCALE_Y,
+    UI_SCALE,
+    WINDOW_HEIGHT,
+    WINDOW_WIDTH,
     SCRIPT_DIR,
     SDLK_DOWN,
     SDLK_ESCAPE,
@@ -127,6 +133,7 @@ from utils import (
     SDL_SetRenderDrawBlendMode,
     SDL_WINDOWPOS_CENTERED,
     SDL_WINDOW_FULLSCREEN,
+    SDL_WINDOW_FULLSCREEN_DESKTOP,
     SDL_WINDOW_SHOWN,
     SLOG,
     TRANSLATIONS,
@@ -165,6 +172,7 @@ import yt_extras as YX
 import player
 import ui
 import auth
+import utils   # v0.3.9: module handle for refresh_geometry/apply_logical_mapping
 
 # ----------------------------------------------------------------------------
 # Main application
@@ -187,27 +195,65 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
                 (_drv.decode("utf-8", "replace") if _drv else "?"), "SDL")
         except Exception:
             LOG("SDL_Init OK", "SDL")
+
+        # v0.3.9: SDL video is initialised - THE ONLY PLACE IT EVER IS,
+        # exactly like v0.3.7 (0.3.8 also initialised it at utils import
+        # and that contributed to the KMSDRM black-screen regression).
+        # Now that it exists we can ask SDL for the real desktop mode:
+        # if the import-time framebuffer probe got the panel wrong,
+        # utils.refresh_geometry() recomputes the whole geometry +
+        # device.txt BEFORE the window opens. On real handhelds the
+        # probes agree and this is a no-op.
+        try:
+            _dm_cls = getattr(sdl2, "SDL_DisplayMode", None)
+            _get_dm = getattr(sdl2, "SDL_GetDesktopDisplayMode", None)
+            if _dm_cls and _get_dm:
+                _dm = _dm_cls()
+                try:
+                    _dm_ref = ctypes.byref(_dm)
+                except TypeError:
+                    _dm_ref = _dm
+                if _get_dm(0, _dm_ref) == 0:
+                    utils.refresh_geometry(int(getattr(_dm, "w", 0) or 0),
+                                           int(getattr(_dm, "h", 0) or 0))
+        except Exception:
+            pass
         if ttf.TTF_Init() != 0:
             LOG("WARN: TTF_Init failed: %s (app runs without text)" %
                 _sdl_err(), "SDL")
             SLOG("Warning: text rendering unavailable")
 
         # --- window with fallback chain -----------------------------------
+        # v0.3.9: the v0.3.7-proven sequence is the PRIMARY path again:
+        # SDL_WINDOW_SHOWN + CENTERED at the NATIVE size. v0.3.8 opened
+        # the window with SDL_WINDOW_FULLSCREEN_DESKTOP at position (0,0)
+        # and on several KMSDRM builds (dArkOSRE's SDL2 among them) that
+        # window presents a DEAD surface: the app runs, input works, the
+        # panel stays black - the 0.3.8 field report. On 640x480 handhelds
+        # this call is byte-identical to v0.3.7; on 1024x768 / 16:9 / 1:1
+        # panels the SAME call simply opens at the bigger native size
+        # (that is what makes the resolution adaptative).
         self.window = SDL_CreateWindow(
             b"PilasTube",
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-            SCREEN_WIDTH, SCREEN_HEIGHT,
+            WINDOW_WIDTH, WINDOW_HEIGHT,
             SDL_WINDOW_SHOWN
         )
         if not self.window:
-            LOG("window (SHOWN) failed: %s - trying FULLSCREEN" % _sdl_err(),
-                "SDL")
+            LOG("window (SHOWN %dx%d) failed: %s - trying FULLSCREEN" %
+                (WINDOW_WIDTH, WINDOW_HEIGHT, _sdl_err()), "SDL")
             self.window = SDL_CreateWindow(
-                b"PilasTube", 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT,
+                b"PilasTube", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
                 SDL_WINDOW_FULLSCREEN)
         if not self.window:
-            LOG("window (FULLSCREEN) failed: %s - trying no flags" %
-                _sdl_err(), "SDL")
+            LOG("window (FULLSCREEN) failed: %s - trying FULLSCREEN_DESKTOP"
+                % _sdl_err(), "SDL")
+            self.window = SDL_CreateWindow(
+                b"PilasTube", 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
+                SDL_WINDOW_FULLSCREEN_DESKTOP)
+        if not self.window:
+            LOG("window (FULLSCREEN_DESKTOP) failed: %s - trying logical "
+                "size" % _sdl_err(), "SDL")
             self.window = SDL_CreateWindow(
                 b"PilasTube", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                 SCREEN_WIDTH, SCREEN_HEIGHT, 0)
@@ -237,7 +283,46 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
             LOG("FATAL: renderer creation failed: %s" % _sdl_err(), "SDL")
             raise RuntimeError("SDL_CreateRenderer failed: %s" % _sdl_err())
         SDL_SetRenderDrawBlendMode(self.renderer, SDL_BLENDMODE_BLEND)
-        LOG("window + renderer ready", "SDL")
+        # v0.3.8/0.3.9: map the logical coordinate system onto the
+        # physical window - ONLY when they actually differ. 640x480
+        # devices skip this entirely and keep the exact v0.3.7 render
+        # path (identity mapping, no extra SDL state); bigger panels get
+        # SDL_RenderSetLogicalSize (fit) / SDL_RenderSetScale (fill) plus
+        # the linear scale-quality hint. See utils.apply_logical_mapping.
+        self._logical_set = utils.apply_logical_mapping(self.renderer)
+
+        # v0.3.9 diagnostics: record EXACTLY what SDL handed us (window
+        # flags + renderer backend) so any future display problem is
+        # diagnosable from logs/detailed.txt alone.
+        _wflags = "n/a"
+        try:
+            _gwflags = getattr(sdl2, "SDL_GetWindowFlags", None)
+            if _gwflags and self.window:
+                _wflags = "0x%08x" % (int(_gwflags(self.window)) &
+                                      0xFFFFFFFF)
+        except Exception:
+            pass
+        _rname = "n/a"
+        try:
+            _info_cls = getattr(sdl2, "SDL_RendererInfo", None)
+            _get_ri = getattr(sdl2, "SDL_GetRendererInfo", None)
+            if _info_cls and _get_ri and self.renderer:
+                _info = _info_cls()
+                try:
+                    _iref = ctypes.byref(_info)
+                except TypeError:
+                    _iref = _info
+                if _get_ri(self.renderer, _iref) == 0:
+                    _n = getattr(_info, "name", None)
+                    if _n:
+                        _rname = (_n.decode("utf-8", "replace")
+                                  if isinstance(_n, bytes) else str(_n))
+        except Exception:
+            pass
+        LOG("window + renderer ready (native %dx%d, logical %dx%d, scale "
+            "%.2f, mode %s, mapped=%s, flags=%s, renderer=%s)" %
+            (WINDOW_WIDTH, WINDOW_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT,
+             UI_SCALE, SCALE_MODE, self._logical_set, _wflags, _rname), "SDL")
 
         # Controller
         self.controller = None
@@ -260,16 +345,23 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
             LOG("no joysticks detected - keyboard input only", "SDL")
 
         # Font
+        # v0.3.8: fonts are rasterised at PHYSICAL size (design size x
+        # UI_SCALE) and draw_text divides the destination rect back to
+        # logical coordinates - text occupies the same layout space as on
+        # a 640x480 screen but renders pixel-crisp at native resolution.
         font_path = self._find_font()
         LOG("font file: %s" % (font_path or "NONE FOUND"), "SDL")
         self.font = self.font_large = self.font_small = self.font_tiny = None
         if font_path:
-            self.font = ttf.TTF_OpenFont(font_path.encode(), 18)
-            self.font_large = ttf.TTF_OpenFont(font_path.encode(), 24)
-            self.font_small = ttf.TTF_OpenFont(font_path.encode(), 14)
-            self.font_tiny = ttf.TTF_OpenFont(font_path.encode(), 12)
+            def _fsize(n):
+                return max(8, int(round(n * UI_SCALE)))
+            self.font = ttf.TTF_OpenFont(font_path.encode(), _fsize(18))
+            self.font_large = ttf.TTF_OpenFont(font_path.encode(), _fsize(24))
+            self.font_small = ttf.TTF_OpenFont(font_path.encode(), _fsize(14))
+            self.font_tiny = ttf.TTF_OpenFont(font_path.encode(), _fsize(12))
         if self.font:
-            LOG("ttf fonts opened (sizes 18/24/14/12)", "SDL")
+            LOG("ttf fonts opened (design 18/24/14/12 x scale %.2f)" %
+                UI_SCALE, "SDL")
         else:
             LOG("WARN: no font loaded - UI text will be invisible", "SDL")
             SLOG("Warning: no font file found - UI text missing")
@@ -535,6 +627,13 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
         if self.wizard_active:
             LOG("first-boot wizard will run", "WIZARD")
             SLOG("First-run setup wizard started")
+
+        # v0.3.8: yt-dlp background update check -> Yes/No popup.
+        # _ytdlp_update_offer is set by the check thread; the main loop
+        # turns it into self.update_popup once the UI is idle.
+        self._ytdlp_update_offer = None      # (current, latest) or None
+        self._ytdlp_check_started = False
+        self.update_popup = None             # {"current","latest","choice"}
 
         # loading spinner sticky flag
         self.loading_spinner_triggered = False
@@ -1953,6 +2052,74 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
 
         run_logged_thread("update-ytdlp", worker)
 
+    # ------------------------------------------------------------------
+    # v0.3.8: background yt-dlp update check (every app open)
+    # ------------------------------------------------------------------
+    def _ytdlp_update_check(self):
+        """Compare the bundled yt-dlp with the latest GitHub release.
+
+        Runs in a daemon thread so startup is NEVER blocked (offline =
+        the check silently skips). When a newer version exists the main
+        loop shows a gamepad Yes/No popup; answering Yes reuses the exact
+        settings updater (download -> replace -> refresh version).
+        """
+        try:
+            if not self.ytdlp_path or not os.path.exists(self.ytdlp_path):
+                return
+            if self.net_offline:
+                LOG("yt-dlp update check skipped (offline)", "YTDLP")
+                return
+            current = YX.ytdlp_version(self.ytdlp_path)
+            latest = YX.ytdlp_latest_version(self.prefs.get("proxy", ""))
+            if not latest:
+                LOG("yt-dlp update check: latest version unreachable",
+                    "YTDLP")
+                return
+            if current and current not in ("unknown", "not found") and \
+                    str(latest) <= str(current):
+                LOG("yt-dlp up to date (%s)" % current, "YTDLP")
+                return
+            LOG("yt-dlp update available: %s -> %s" % (current, latest),
+                "YTDLP")
+            # hand over to the main thread - workers never touch the UI
+            self._ytdlp_update_offer = (current, latest)
+        except Exception:
+            pass
+
+    def _ytdlp_maybe_show_popup(self):
+        """Main-loop side: turn a finished check into the popup (idle UI
+        only - never over the player, wizard, keyboard, sign-in or any
+        other modal)."""
+        offer = self._ytdlp_update_offer
+        if offer is None or self.update_popup is not None:
+            return
+        if self.wizard_active or self.search_active or self.login_active or \
+                self.is_loading_video or self.ctx_open or self.info_open or \
+                self.queue_open or self.is_playing or self.player is not \
+                None or self.autoplay_countdown is not None or \
+                self.channel_view is not None:
+            return
+        self._ytdlp_update_offer = None
+        self.update_popup = {
+            "current": offer[0], "latest": offer[1], "choice": 0}
+        self.need_redraw = True
+        LOG("showing yt-dlp update popup (%s -> %s)" % offer, "YTDLP")
+
+    def _ytdlp_popup_answer(self, yes):
+        """Close the popup; Yes runs the real updater, No just dismisses."""
+        p = self.update_popup
+        self.update_popup = None
+        self.need_redraw = True
+        if p is None:
+            return
+        if yes:
+            LOG("user accepted yt-dlp update", "YTDLP")
+            self._run_ytdlp_update()
+        else:
+            LOG("user skipped yt-dlp update (%s available)" %
+                p.get("latest"), "YTDLP")
+            self.set_status(self.t("update_skipped"), "ok")
+
     def _suggest_async(self):
         """Fetch suggestions for the current query (v3.6: on demand ONLY).
 
@@ -2735,6 +2902,13 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
 
     def _dispatch_one_direction(self, d, now=None):
         now = SDL_GetTicks() if now is None else now
+        # --- v0.3.8 yt-dlp update popup: LEFT/RIGHT toggle Yes/No ---
+        # (modal - it consumes every direction while open)
+        if self.update_popup is not None:
+            if d in ("left", "right"):
+                self.update_popup["choice"] ^= 1
+                self.need_redraw = True
+            return
         # --- first-boot wizard ---
         if self.wizard_active:
             if d == "up":
@@ -2859,6 +3033,32 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
             # never leave a stale auto-repeat running across a screen change
             self.key_held = None
             self._dir_held.clear()
+            return
+
+        # ---------- v0.3.8 yt-dlp UPDATE POPUP (Yes/No) ----------
+        # A modal: while it is up it owns the input (LEFT/RIGHT toggle the
+        # choice, A confirms, B = No). It only ever opens on an idle main
+        # UI, so no other handler competes for these buttons.
+        if self.update_popup is not None:
+            if event.type == SDL_CONTROLLERBUTTONDOWN:
+                btn = event.cbutton.button
+                if btn == SDL_CONTROLLER_BUTTON_A:
+                    self._ytdlp_popup_answer(self.update_popup["choice"] == 0)
+                elif btn == SDL_CONTROLLER_BUTTON_B:
+                    self._ytdlp_popup_answer(False)
+                elif btn in (SDL_CONTROLLER_BUTTON_DPAD_LEFT,
+                             SDL_CONTROLLER_BUTTON_DPAD_RIGHT):
+                    self.update_popup["choice"] ^= 1
+                    self.need_redraw = True
+            elif event.type == SDL_KEYDOWN:
+                key = event.key.keysym.sym
+                if key in (SDLK_RETURN, SDLK_z):
+                    self._ytdlp_popup_answer(self.update_popup["choice"] == 0)
+                elif key in (SDLK_ESCAPE, SDLK_x):
+                    self._ytdlp_popup_answer(False)
+                elif key in (SDLK_LEFT, SDLK_RIGHT):
+                    self.update_popup["choice"] ^= 1
+                    self.need_redraw = True
             return
 
         # ---------- FIRST-BOOT WIZARD ----------
@@ -3166,6 +3366,14 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
         # interrupted when the network comes back.
         self.start_net_watch()
 
+        # v0.3.8: background yt-dlp update check - once per app open,
+        # daemon thread (never blocks startup); a newer version triggers
+        # the gamepad Yes/No popup once the UI is idle.
+        if not self._ytdlp_check_started:
+            self._ytdlp_check_started = True
+            run_logged_thread("ytdlp-update-check",
+                              self._ytdlp_update_check, daemon=True)
+
         # after the wizard, auto-load the trending feed
         if self.wizard_active:
             while self.running and self.wizard_active:
@@ -3217,6 +3425,9 @@ class PilasTubeApp(auth.AuthMixin, player.PlayerMixin, ui.UIMixin):
                     self.home_existing_ids = set()
                     self.home_feed_source = ""
             self.process_repeat()
+
+            # v0.3.8: yt-dlp update popup (deferred to an idle main UI)
+            self._ytdlp_maybe_show_popup()
 
             current_time = SDL_GetTicks()
 

@@ -37,7 +37,11 @@ from utils import (
     QUALITY_OPTIONS,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
+    UI_SCALE,
     SCRIPT_DIR,
+    WINDOW_HEIGHT,
+    WINDOW_WIDTH,
+    apply_logical_mapping,
     SDL_BLENDMODE_BLEND,
     SDL_BLENDMODE_NONE,
     SDL_ClearQueuedAudio,
@@ -320,12 +324,37 @@ class FFPlayer(object):
         ffmpeg scales to exactly this size, so SDL blits 1:1 (no per-frame
         scaling / colorspace conversion in the renderer) and the pipe
         carries fewer bytes - both matter a lot on a slow ARM core.
+
+        v0.3.8: the size is computed in LOGICAL coordinates (the 640x480
+        design grid) and then multiplied by UI_SCALE so the decode happens
+        at the device's PHYSICAL resolution - on a 1024x768 panel video
+        renders at 1024x768 instead of 640x480 (sharper, same pipe layout).
+        Capped at ~720p worth of pixels so small ARM cores are safe.
         """
         sw = max(2, int(self.src_width or 640))
         sh = max(2, int(self.src_height or 360))
         scale = min(SCREEN_WIDTH / float(sw), SCREEN_HEIGHT / float(sh), 1.0)
         w = max(2, int(round(sw * scale))) & ~1
         h = max(2, int(round(sh * scale))) & ~1
+        sc = UI_SCALE if UI_SCALE and UI_SCALE > 1.0 else 1.0
+        if sc != 1.0:
+            w = max(2, int(round(w * sc))) & ~1
+            h = max(2, int(round(h * sc))) & ~1
+            # never upscale beyond the SOURCE resolution (a 640x480 video
+            # gains nothing from decoding at 1024x768 - the GPU upscales
+            # it for free), and keep the decode within a ~720p pixel
+            # budget so small ARM cores are always safe.
+            cap_w, cap_h = sw & ~1, sh & ~1
+            if w * h > 1000000 or w > cap_w or h > cap_h:
+                shrink = 1.0
+                if w * h > 1000000:
+                    shrink = min(shrink,
+                                 math.sqrt(1000000.0 / (w * h)))
+                if w > cap_w or h > cap_h:
+                    # scale down to the source size, aspect preserved
+                    shrink = min(shrink, cap_w / float(w), cap_h / float(h))
+                w = max(2, int(round(w * shrink))) & ~1
+                h = max(2, int(round(h * shrink))) & ~1
         return w, h
 
     def _apply_size(self):
@@ -1464,9 +1493,12 @@ class PlayerMixin(object):
             if rc != 0:
                 LOG("SDL_InitSubSystem(video) failed: %s" % _sdl_err(),
                     "SDL")
+            # v0.3.9: rebuild the window at the NATIVE size (v0.3.7's
+            # proven flags=0 + CENTERED call, just at WINDOW_WIDTH/HEIGHT
+            # so big panels keep the full-screen canvas).
             self.window = SDL_CreateWindow(
                 b"PilasTube", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                SCREEN_WIDTH, SCREEN_HEIGHT, 0)
+                WINDOW_WIDTH, WINDOW_HEIGHT, 0)
             self.renderer = SDL_CreateRenderer(
                 self.window, -1,
                 SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
@@ -1478,6 +1510,11 @@ class PlayerMixin(object):
                     self.window, -1, SDL_RENDERER_SOFTWARE)
             if self.renderer:
                 SDL_SetRenderDrawBlendMode(self.renderer, SDL_BLENDMODE_BLEND)
+                # v0.3.9: v0.3.8 lost the logical-size mapping here -
+                # after an external player exited, big-panel UIs rendered
+                # 1:1 (wrong scale) until restart. Re-apply it exactly
+                # like at startup (no-op on identity/640x480 devices).
+                apply_logical_mapping(self.renderer)
             # caches were cleared on suspend - force a full redraw
             self.text_cache = {}
             self.image_cache = {}
@@ -2474,8 +2511,17 @@ class PlayerMixin(object):
                                   vw * 4)
             except Exception:
                 pass
-            scale = min(SCREEN_WIDTH / float(vw), SCREEN_HEIGHT / float(vh))
-            dw, dh = int(vw * scale), int(vh * scale)
+            # v0.3.8: the texture is PHYSICAL pixels (design x UI_SCALE) -
+            # map it back to LOGICAL coordinates for the blit. fit-mode
+            # logical size shares the panel aspect, so this lands 1:1 on
+            # the physical screen (no double scaling).
+            sc = UI_SCALE if UI_SCALE and UI_SCALE > 1.0 else 1.0
+            dw, dh = int(round(vw / sc)), int(round(vh / sc))
+            if dw > SCREEN_WIDTH or dh > SCREEN_HEIGHT or dw < 2 or dh < 2:
+                # defensive: refit if the logical size fell out of range
+                scale = min(SCREEN_WIDTH / float(vw),
+                            SCREEN_HEIGHT / float(vh))
+                dw, dh = int(vw * scale), int(vh * scale)
             dx, dy = (SCREEN_WIDTH - dw) // 2, (SCREEN_HEIGHT - dh) // 2
             SDL_RenderCopy(self.renderer, player.texture, None,
                            SDL_Rect(dx, dy, dw, dh))
