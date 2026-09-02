@@ -237,8 +237,7 @@ exactly which layer failed.
 
 ## Credits
 
-- **PilasTube** — project direction & on-device testing: Jackson Manfredo;
-  engineered with [Super Z](https://z.ai) (Z.ai)
+- **PilasTube** — project direction & on-device testing: José Pilas;
 - **[SmartTube](https://github.com/yuliskov/SmartTube)** by yuliskov —
   the feature blueprint and the TV request shapes this app follows
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — stream extraction
@@ -251,8 +250,6 @@ exactly which layer failed.
   crowd-sourced metadata APIs
 - **PortMaster & the r36swiki.com community** — the platform and the
   original port this all started from
-- The terminal boot screen is an homage to DDLC's famous opening.
-  *Just Monika.*
 
 ## Version history
 
@@ -284,17 +281,6 @@ exactly which layer failed.
 | Version | Highlights |
 |---|---|
 | **0.3.7** | Account feeds rebuilt for YouTube's new TV format; TV-app identity; terminal boot screen; feed diagnostics |
-| **0.3.6** | Category grid navigation; audio-language selection; SUG-key suggestions; Recommended feed + localized titles fixed; search pages (16/page); WiFi watchdog |
-| **0.3.5** | Modularized into six modules — no behaviour change |
-| **0.3.4** | Live-stream audio fixed; Recommended + Categories tabs; L2/R2 section switching; “Desligado” picker bug |
-| **0.3.3** | Two-pane Settings (never scrolls); account login via yt.be/activate |
-| **0.3.2** | Playback consistency (colors, clock, seeks); codec + network-route selectors |
-| **0.3.1** | Video pipeline + input overhaul (bluish tint, racing progress bar, navigable HUD) |
-| **0.3.0** | Built-in player — no-sound and black-screen-after-B fixed |
-| **0.2.2** | Exit only via START+SELECT; trending fallback chain; WiFi indicator |
-| **0.2.1** | Crash logging + hardened startup |
-| **0.2.0** | The SmartTube-inspired wave: subscriptions, SponsorBlock, queue, quality engine, first-boot wizard |
-| **0.1.0** | The original community port |
 
 ---
 
