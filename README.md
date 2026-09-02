@@ -278,9 +278,8 @@ exactly which layer failed.
   status and video count to `logs/detailed.txt`, so future YouTube
   changes are visible immediately.
 
-| Version | Highlights |
-|---|---|
-| **0.3.7** | Account feeds rebuilt for YouTube's new TV format; TV-app identity; terminal boot screen; feed diagnostics |
+
+| **Were added from the first community version** | Account feeds rebuilt for YouTube's new TV format, TV-app identity, terminal boot screen, feed diagnostics, category grid navigation, audio-language selection, SUG-key suggestions, Recommended feed + localized titles fix, search pages (16/page), WiFi watchdog, modularized into six modules, live-stream audio fix, Recommended + Categories tabs, L2/R2 section switching, “Desligado” picker bug fix, two-pane Settings, account login via yt.be/activate, playback consistency, codec selector, network-route selector, video pipeline overhaul, input overhaul, bluish tint fix, racing progress bar, navigable HUD, built-in player, no-sound fix, black-screen-after-B fix, START+SELECT exit, trending fallback chain, WiFi indicator, crash logging, hardened startup, subscriptions, SponsorBlock, queue, quality engine, first-boot wizard. |
 
 ---
 
