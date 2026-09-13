@@ -48,3 +48,10 @@ def _load():
 
 
 _load()
+
+# ROCKNIX/R36XX: redirect mutable preferences/history/token files to a
+# genuinely writable user-data directory when the port directory is RO.
+try:
+    import state_bootstrap
+except Exception as exc:
+    print("[STATE] bootstrap load failed: %s" % exc)
