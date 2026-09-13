@@ -63,6 +63,12 @@ except Exception as exc:
 # race inside SDL/EGL and kill the Python process with exit code 139.
 # Wayland permits SDL and mpv to own separate surfaces, so keep SDL alive
 # while mpv is fullscreen. KMSDRM/X11 retain the old suspend/resume path.
+#
+# v0.3.9-hotfix3: keeping the SDL window ALIVE but VISIBLE lets the SDL
+# surface remain in front of mpv on some Wayland compositors. The result is
+# exactly "mpv audio works, video is invisible". Hide the existing SDL window
+# instead of destroying it. mpv then gets the topmost visible surface while
+# the SDL/EGL objects remain valid, avoiding the old exit-139 race.
 try:
     import builtins as _builtins
     _orig_import = _builtins.__import__
@@ -74,15 +80,30 @@ try:
                 _PM = module.PlayerMixin
                 if not getattr(_PM, "_wayland_sdl_guard", False):
                     def _wayland_suspend(self):
-                        print("[SDL] Wayland: keep SDL surface alive while mpv runs")
+                        try:
+                            if self.window:
+                                module.sdl2.SDL_HideWindow(self.window)
+                                module.LOG("Wayland: SDL window hidden; mpv owns visible output", "SDL")
+                            else:
+                                print("[SDL] Wayland: no SDL window to hide")
+                        except Exception as exc:
+                            print("[SDL] Wayland hide window failed: %s" % exc)
 
                     def _wayland_resume(self):
-                        print("[SDL] Wayland: SDL surface already alive after mpv")
+                        try:
+                            if self.window:
+                                module.sdl2.SDL_ShowWindow(self.window)
+                                module.sdl2.SDL_RaiseWindow(self.window)
+                                module.LOG("Wayland: SDL window restored after mpv", "SDL")
+                            else:
+                                print("[SDL] Wayland: SDL window missing after mpv")
+                        except Exception as exc:
+                            print("[SDL] Wayland show window failed: %s" % exc)
 
                     _PM._sdl_video_suspend = _wayland_suspend
                     _PM._sdl_video_resume = _wayland_resume
                     _PM._wayland_sdl_guard = True
-                    print("[SDL] Wayland mpv guard enabled")
+                    print("[SDL] Wayland mpv guard enabled (hide/show, keep EGL alive)")
             except Exception as exc:
                 print("[SDL] Wayland mpv guard unavailable: %s" % exc)
         return module
