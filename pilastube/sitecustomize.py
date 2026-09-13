@@ -55,11 +55,12 @@ try:
     _YX.ytdlp_common_args = _pilastube_ytdlp_common_args
     print("[YTDLP] playback client fallback enabled: web_embedded,tv,android_vr")
 
-    # v0.3.9-hotfix5: some VOD responses contain video-only DASH formats but
-    # no usable audio-only format for the selected client. Without ffmpeg the
-    # app cannot mux those streams. Prefer a single progressive A/V stream in
-    # that case so mpv receives one self-contained URL. H.264 is preferred on
-    # the R36XX, then the closest format under the requested quality cap.
+    # v0.3.9-hotfix5/6: external mpv cannot rely on yt-dlp's DASH video-only
+    # + audio-only pair when the handheld has no ffmpeg muxer. mpv CAN accept
+    # --audio-file, but some YouTube CDN/client combinations return a paired
+    # stream that mpv opens inconsistently on this old ROCKNIX build. Prefer a
+    # single progressive A/V URL whenever one exists. This also makes playback
+    # independent of the language/codec metadata on separate audio tracks.
     _orig_select_formats = _YX.select_formats
 
     def _pilastube_select_formats(info, quality="Auto", codec="Auto",
@@ -70,7 +71,9 @@ try:
         try:
             video_url, audio_url, height, note = result
             live = bool(info.get("is_live")) or info.get("live_status") == "is_live"
-            if video_url and not audio_url and not live:
+            # Only force this path when the app is using external mpv. The
+            # built-in ffmpeg player is fully capable of separate A/V inputs.
+            if video_url and not live and not ffmpeg_path:
                 formats = info.get("formats") or []
                 cap = _YX.quality_cap(quality)
                 candidates = []
@@ -96,8 +99,11 @@ try:
                         tbr = float(f.get("tbr") or 0)
                     except (TypeError, ValueError):
                         tbr = 0.0
-                    # Prefer H.264, then resolution closest to the cap,
-                    # then bitrate. Never upscale beyond the selected cap.
+                    # H.264 first, then the highest resolution not exceeding
+                    # the cap, then bitrate. If every candidate is above the
+                    # cap, choose the smallest overshoot. This is deliberately
+                    # language-neutral: progressive A/V contains its own audio
+                    # and therefore works for Vietnamese, French, Korean, etc.
                     under = 1 if h <= cap else 0
                     distance = -abs(h - cap)
                     h264 = 1 if fam == "H.264" else 0
@@ -105,18 +111,18 @@ try:
                 if candidates:
                     candidates.sort(key=lambda x: x[:4], reverse=True)
                     best = candidates[0][4]
-                    print("[PLAYER] VOD muxed fallback: %s %sp" % (
-                        _YX.codec_family(best.get("vcodec")) or "A/V",
-                        best.get("height") or "?"))
+                    fam = _YX.codec_family(best.get("vcodec")) or "A/V"
+                    print("[PLAYER] external-mpv progressive: %s %sp" % (
+                        fam, best.get("height") or "?"))
                     return (best.get("url"), None,
                             best.get("height") or height or 0,
-                            "muxed-fallback")
+                            "progressive-av")
         except Exception as exc:
-            print("[PLAYER] format fallback unavailable: %s" % exc)
+            print("[PLAYER] progressive format patch unavailable: %s" % exc)
         return result
 
     _YX.select_formats = _pilastube_select_formats
-    print("[PLAYER] VOD muxed/progressive format fallback enabled")
+    print("[PLAYER] external-mpv progressive A/V fallback enabled")
 except Exception as exc:
     print("[YTDLP] playback format patch unavailable: %s" % exc)
 
