@@ -57,6 +57,52 @@ try:
 except Exception as exc:
     print("[YTDLP] playback client patch unavailable: %s" % exc)
 
+# v0.3.9-hotfix4: when ROCKNIX/mpv uses the Mali hardware decoder through
+# Wayland, some VOD codecs/stream profiles can produce audio with a black
+# video surface or exit immediately. The same mpv build can still play some
+# live H.264 streams, which made the bug look video-specific. Force software
+# decoding for the external mpv path; the GPU is still used for rendering.
+# mpv documents hwdec=no as the reliable software-decoding mode.
+try:
+    import builtins as _builtins_hw
+    _orig_import_hw = _builtins_hw.__import__
+
+    def _pilastube_import_hw(name, globals=None, locals=None, fromlist=(), level=0):
+        module = _orig_import_hw(name, globals, locals, fromlist, level)
+        if name == "player":
+            try:
+                _PM = module.PlayerMixin
+                if not getattr(_PM, "_rocknix_hwdec_guard", False):
+                    _orig_launch_external = _PM._launch_player_external
+
+                    def _rocknix_launch_external(self, video, video_url, audio_url,
+                                                 resume_at, sub_path, chapters_path, info):
+                        old_get = getattr(self.prefs, "get", None)
+                        if old_get is not None:
+                            def _prefs_get(key, default=""):
+                                if key == "hwdec":
+                                    return "Off"
+                                return old_get(key, default)
+                            self.prefs.get = _prefs_get
+                        try:
+                            return _orig_launch_external(
+                                self, video, video_url, audio_url, resume_at,
+                                sub_path, chapters_path, info)
+                        finally:
+                            if old_get is not None:
+                                self.prefs.get = old_get
+
+                    _PM._launch_player_external = _rocknix_launch_external
+                    _PM._rocknix_hwdec_guard = True
+                    print("[PLAYER] ROCKNIX external mpv hwdec guard enabled (software decode)")
+            except Exception as exc:
+                print("[PLAYER] ROCKNIX hwdec guard unavailable: %s" % exc)
+        return module
+
+    _builtins_hw.__import__ = _pilastube_import_hw
+except Exception as exc:
+    print("[PLAYER] hwdec import hook unavailable: %s" % exc)
+
 # v0.3.9-hotfix2: ROCKNIX launches PilasTube under Wayland. In that mode
 # destroying SDL's renderer/window immediately before spawning mpv, then
 # recreating them while the many image-loader workers are still alive, can
