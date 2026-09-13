@@ -40,6 +40,21 @@ if USERDATA:
     _MAP = {os.path.join(BASE, n): os.path.join(USERDATA, n) for n in NAMES}
     _orig_open = builtins.open
     _orig_replace = os.replace
+    _orig_exists = os.path.exists
+    _orig_isfile = os.path.isfile
+
+    # Copy old state before installing redirects. This preserves the current
+    # language/login/history/preferences on the first launch after this fix.
+    for _old, _new in list(_MAP.items()):
+        try:
+            if _orig_isfile(_old) and not _orig_isfile(_new):
+                with _orig_open(_old, "rb") as _src:
+                    with _orig_open(_new, "wb") as _dst:
+                        _dst.write(_src.read())
+                print("[STATE] migrated: %s" % os.path.basename(_old))
+        except Exception as _exc:
+            print("[STATE] migration skipped %s: %s" %
+                  (os.path.basename(_old), _exc))
 
     def _redirect(path):
         try:
@@ -53,8 +68,16 @@ if USERDATA:
     def _replace(src, dst, *args):
         return _orig_replace(_redirect(src), _redirect(dst), *args)
 
+    def _exists(path):
+        return _orig_exists(_redirect(path))
+
+    def _isfile(path):
+        return _orig_isfile(_redirect(path))
+
     builtins.open = _open
     os.replace = _replace
+    os.path.exists = _exists
+    os.path.isfile = _isfile
     print("[STATE] writable user-data: %s" % USERDATA)
     try:
         import yt_extras
