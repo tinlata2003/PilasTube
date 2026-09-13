@@ -54,8 +54,71 @@ try:
 
     _YX.ytdlp_common_args = _pilastube_ytdlp_common_args
     print("[YTDLP] playback client fallback enabled: web_embedded,tv,android_vr")
+
+    # v0.3.9-hotfix5: some VOD responses contain video-only DASH formats but
+    # no usable audio-only format for the selected client. Without ffmpeg the
+    # app cannot mux those streams. Prefer a single progressive A/V stream in
+    # that case so mpv receives one self-contained URL. H.264 is preferred on
+    # the R36XX, then the closest format under the requested quality cap.
+    _orig_select_formats = _YX.select_formats
+
+    def _pilastube_select_formats(info, quality="Auto", codec="Auto",
+                                  ffmpeg_path=None, audio_lang="Original"):
+        result = _orig_select_formats(
+            info, quality, codec, ffmpeg_path=ffmpeg_path,
+            audio_lang=audio_lang)
+        try:
+            video_url, audio_url, height, note = result
+            live = bool(info.get("is_live")) or info.get("live_status") == "is_live"
+            if video_url and not audio_url and not live:
+                formats = info.get("formats") or []
+                cap = _YX.quality_cap(quality)
+                candidates = []
+                for f in formats:
+                    u = f.get("url")
+                    vc = str(f.get("vcodec") or "none")
+                    ac = str(f.get("acodec") or "none")
+                    ext = str(f.get("ext") or "").lower()
+                    if not u or vc == "none" or ac == "none":
+                        continue
+                    if ext not in ("mp4", "webm", "mkv", "mov", "flv", "3gp", ""):
+                        continue
+                    try:
+                        h = int(f.get("height") or 0)
+                    except (TypeError, ValueError):
+                        h = 0
+                    if h <= 0:
+                        continue
+                    fam = _YX.codec_family(vc)
+                    if codec != "Auto" and fam != codec:
+                        continue
+                    try:
+                        tbr = float(f.get("tbr") or 0)
+                    except (TypeError, ValueError):
+                        tbr = 0.0
+                    # Prefer H.264, then resolution closest to the cap,
+                    # then bitrate. Never upscale beyond the selected cap.
+                    under = 1 if h <= cap else 0
+                    distance = -abs(h - cap)
+                    h264 = 1 if fam == "H.264" else 0
+                    candidates.append((under, h264, distance, tbr, f))
+                if candidates:
+                    candidates.sort(key=lambda x: x[:4], reverse=True)
+                    best = candidates[0][4]
+                    print("[PLAYER] VOD muxed fallback: %s %sp" % (
+                        _YX.codec_family(best.get("vcodec")) or "A/V",
+                        best.get("height") or "?"))
+                    return (best.get("url"), None,
+                            best.get("height") or height or 0,
+                            "muxed-fallback")
+        except Exception as exc:
+            print("[PLAYER] format fallback unavailable: %s" % exc)
+        return result
+
+    _YX.select_formats = _pilastube_select_formats
+    print("[PLAYER] VOD muxed/progressive format fallback enabled")
 except Exception as exc:
-    print("[YTDLP] playback client patch unavailable: %s" % exc)
+    print("[YTDLP] playback format patch unavailable: %s" % exc)
 
 # v0.3.9-hotfix4: when ROCKNIX/mpv uses the Mali hardware decoder through
 # Wayland, some VOD codecs/stream profiles can produce audio with a black
