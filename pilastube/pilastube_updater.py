@@ -4,9 +4,6 @@
 Run this before importing the main application. It checks the latest main
 commit on GitHub, downloads the repository ZIP only when it changed, and
 replaces application files while preserving user data and logs.
-
-This module uses only Python's standard library so it works with the Python
-runtime already shipped with ROCKNIX/PortMaster.
 """
 
 import json
@@ -25,11 +22,9 @@ _ROOT = os.path.dirname(_BASE)
 _STATE = os.path.join(_BASE, ".update_sha")
 _LOG = os.path.join(_BASE, "logs", "detailed.txt")
 
-# Keep the launch fast when GitHub/network is unavailable.
 _API_TIMEOUT = 4
 _DOWNLOAD_TIMEOUT = 30
 
-# Never overwrite personal data generated on the device.
 _PRESERVE_FILES = {
     "device.txt",
     "u_preferences.txt",
@@ -45,6 +40,23 @@ _PRESERVE_FILES = {
 _PRESERVE_DIRS = {"logs", ".thumb_cache"}
 
 
+def _visible(message):
+    """Show updater status on the handheld's Linux terminal when possible."""
+    try:
+        tty = "/dev/tty0"
+        if os.path.exists(tty) and os.access(tty, os.W_OK):
+            with open(tty, "w", encoding="ascii", errors="replace") as f:
+                f.write("\033[2J\033[H")
+                f.write("PilasTube\n")
+                f.write("==============================\n")
+                f.write("AUTO UPDATE\n\n")
+                f.write(message[:160] + "\n")
+                f.write("\nPlease wait...\n")
+                f.flush()
+    except Exception:
+        pass
+
+
 def _log(message):
     try:
         os.makedirs(os.path.dirname(_LOG), exist_ok=True)
@@ -54,9 +66,10 @@ def _log(message):
     except Exception:
         pass
     try:
-        print("[AUTO-UPDATE] " + message)
+        print("[AUTO-UPDATE] " + message, flush=True)
     except Exception:
         pass
+    _visible(message)
 
 
 def _ssl_context():
@@ -113,7 +126,6 @@ def _install_from_zip(archive, sha):
     tmp_root = tempfile.mkdtemp(prefix="pilastube-update-", dir=_ROOT)
     try:
         with zipfile.ZipFile(archive, "r") as z:
-            # Reject unsafe archive paths before extraction.
             root_real = os.path.realpath(tmp_root)
             for info in z.infolist():
                 target = os.path.realpath(os.path.join(tmp_root, info.filename))
@@ -130,7 +142,7 @@ def _install_from_zip(archive, sha):
             raise RuntimeError("unexpected GitHub archive layout")
         source_root = roots[0]
 
-        # Copy the launcher and bootstrap files first.
+        _visible("Installing update %s..." % sha[:12])
         for name in ("PilasTube.sh", "README.md"):
             src = os.path.join(source_root, name)
             if os.path.isfile(src):
@@ -140,7 +152,6 @@ def _install_from_zip(archive, sha):
         if not os.path.isdir(src_app):
             raise RuntimeError("pilastube directory missing in update")
 
-        # Copy all tracked application files recursively, except device data.
         for current, dirs, files in os.walk(src_app):
             rel = os.path.relpath(current, src_app)
             if rel == ".":
@@ -155,7 +166,6 @@ def _install_from_zip(archive, sha):
                 dst = os.path.join(target_dir, name)
                 _safe_copy(src, dst)
 
-        # The bundled launcher must remain executable on Linux.
         launcher = os.path.join(_ROOT, "PilasTube.sh")
         try:
             mode = os.stat(launcher).st_mode
@@ -170,31 +180,32 @@ def _install_from_zip(archive, sha):
 
 
 def update_if_needed():
-    """Check GitHub and update the installed app if main changed.
-
-    Returns True when an update was installed, False otherwise. All failures
-    are intentionally non-fatal: PilasTube must still start offline.
-    """
+    """Check GitHub and update the installed app if main changed."""
     if os.environ.get("PILASTUBE_AUTO_UPDATE", "1").lower() in {
         "0", "false", "no", "off"
     }:
         _log("disabled by PILASTUBE_AUTO_UPDATE")
         return False
 
+    _visible("Checking GitHub for updates...")
     try:
         latest = _latest_sha()
         current = _read_state()
         if current == latest:
             return False
 
-        _log("update available: %s -> %s" %
+        _log("UPDATE FOUND: %s -> %s" %
              (current[:10] or "unknown", latest[:10]))
+        _visible("UPDATE FOUND!\n%s -> %s" %
+                 (current[:12] or "unknown", latest[:12]))
+        time.sleep(0.8)
 
         archive_url = "https://github.com/%s/archive/refs/heads/%s.zip" % (
             _REPO, _BRANCH
         )
         archive = os.path.join(_BASE, ".pilastube-update.zip")
         try:
+            _visible("Downloading update %s..." % latest[:12])
             with _http(archive_url, _DOWNLOAD_TIMEOUT) as r, open(archive, "wb") as f:
                 shutil.copyfileobj(r, f, length=1024 * 1024)
 
@@ -202,7 +213,9 @@ def update_if_needed():
                 raise RuntimeError("downloaded archive is too small")
 
             _install_from_zip(archive, latest)
-            _log("update installed successfully: %s" % latest[:12])
+            _log("UPDATE INSTALLED: %s" % latest[:12])
+            _visible("UPDATE INSTALLED!\nVersion: %s\nRestarting app..." % latest[:12])
+            time.sleep(1.2)
             return True
         finally:
             try:
@@ -211,9 +224,10 @@ def update_if_needed():
                 pass
     except Exception as exc:
         _log("update skipped: %s" % exc)
+        _visible("Update skipped. Starting PilasTube...")
+        time.sleep(0.5)
         return False
 
 
-# Called by the launcher/bootstrap when explicitly imported.
 if __name__ == "__main__":
     update_if_needed()
