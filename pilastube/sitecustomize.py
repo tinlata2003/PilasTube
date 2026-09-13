@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""PilasTube platform font bootstrap.
+"""PilasTube platform font bootstrap for ROCKNIX/PortMaster.
 
-ROCKNIX/PortMaster images do not always keep DejaVu Sans at the exact paths
-used by the original UI code. Python automatically imports sitecustomize when
-this directory is on PYTHONPATH, so use it to locate an installed TTF before
-PilasTube imports its UI module.
-
-This does not replace the app's renderer or SDL setup; it only redirects the
-legacy bundled-font request to a real readable system/PortMaster font.
+The app historically expects SCRIPT_DIR/font.ttf, but the port does not ship
+that file and ROCKNIX may store fonts at different paths. sitecustomize is
+loaded automatically because pilastube is on PYTHONPATH. We install a small
+import hook for ui.py so the real SDL2 modules are loaded normally first, then
+UIMixin._find_font is replaced with a runtime font locator.
 """
 
+import importlib.abc
+import importlib.machinery
 import os
 import subprocess
+import sys
+
+
+_BASE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _find_font():
     candidates = [
         os.environ.get("PILASTUBE_FONT"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "font.ttf"),
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -34,9 +37,6 @@ def _find_font():
     for path in candidates:
         if path and os.path.isfile(path) and os.access(path, os.R_OK):
             return path
-
-    # Fontconfig is present on many ROCKNIX/PortMaster builds even when the
-    # font is outside the hard-coded FHS paths above.
     try:
         out = subprocess.check_output(
             ["fc-match", "-f", "%{file}", "DejaVu Sans"],
@@ -54,44 +54,55 @@ _FONT = _find_font()
 if _FONT:
     os.environ["PILASTUBE_FONT_PATH"] = _FONT
 
-    # ui.py historically checks for SCRIPT_DIR/font.ttf first and returns
-    # that path. Keep that source code compatible while redirecting the actual
-    # SDL_ttf open call to the discovered system font.
-    try:
-        import sdl2.sdlttf as _ttf
-        _open_font = _ttf.TTF_OpenFont
 
-        def _patched_open_font(path, ptsize):
+class _UIFontLoader(importlib.abc.Loader):
+    def __init__(self, real_spec):
+        self.real_spec = real_spec
+
+    def create_module(self, spec):
+        if self.real_spec.loader and hasattr(self.real_spec.loader, "create_module"):
+            return self.real_spec.loader.create_module(spec)
+        return None
+
+    def exec_module(self, module):
+        loader = self.real_spec.loader
+        if loader is None or not hasattr(loader, "exec_module"):
+            raise ImportError("cannot load ui.py")
+        loader.exec_module(module)
+
+        # Patch only the font lookup. The rest of the UI/rendering code stays
+        # untouched, so this is safe across future PilasTube UI changes.
+        if _FONT:
+            def _find_font(self):
+                return _FONT
+            module.UIMixin._find_font = _find_font
             try:
-                if isinstance(path, bytes):
-                    requested = path.decode("utf-8", "replace")
-                else:
-                    requested = str(path)
-                if requested.endswith("/font.ttf") and requested != _FONT:
-                    path = _FONT.encode("utf-8")
+                module.LOG("ROCKNIX font selected: %s" % _FONT, "FONT")
             except Exception:
                 pass
-            return _open_font(path, ptsize)
-
-        _ttf.TTF_OpenFont = _patched_open_font
-    except Exception:
-        pass
-
-    # Make the first legacy path appear available to ui.py so it reaches the
-    # patched TTF_OpenFont call even when no font.ttf is bundled in the port.
-    try:
-        _exists = os.path.exists
-        _legacy_font = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "font.ttf")
-
-        def _patched_exists(path):
+        else:
             try:
-                if os.path.abspath(str(path)) == _legacy_font:
-                    return True
+                module.LOG("WARN: ROCKNIX font discovery found no readable TTF", "FONT")
             except Exception:
                 pass
-            return _exists(path)
 
-        os.path.exists = _patched_exists
-    except Exception:
-        pass
+
+class _UIFontFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != "ui":
+            return None
+        # Bypass this finder while resolving the real ui.py.
+        try:
+            sys.meta_path.remove(self)
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        finally:
+            if self not in sys.meta_path:
+                sys.meta_path.insert(0, self)
+        if spec is None:
+            return None
+        spec.loader = _UIFontLoader(spec)
+        return spec
+
+
+if _FONT:
+    sys.meta_path.insert(0, _UIFontFinder())
