@@ -3,10 +3,10 @@
 """PilasTube platform font bootstrap for ROCKNIX/PortMaster.
 
 The app historically expects SCRIPT_DIR/font.ttf, but the port does not ship
-that file and ROCKNIX may store fonts at different paths. sitecustomize is
-loaded automatically because pilastube is on PYTHONPATH. We install a small
-import hook for ui.py so the real SDL2 modules are loaded normally first, then
-UIMixin._find_font is replaced with a runtime font locator.
+that file and ROCKNIX may store fonts at different paths.  This module keeps
+font discovery independent from the working directory and prefers standard
+Unicode TTF files before PortMaster theme fonts (some theme fonts are not
+compatible with every SDL2_ttf build).
 """
 
 import importlib.abc
@@ -20,33 +20,49 @@ _BASE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _find_font():
+    # PILASTUBE_FONT is an explicit override for debugging/custom ports.
     candidates = [
         os.environ.get("PILASTUBE_FONT"),
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        os.path.join(_BASE, "font.ttf"),
+        # Standard Unicode fonts. Prefer these over PortMaster theme fonts.
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/local/share/fonts/NotoSans-Regular.ttf",
         "/usr/local/share/fonts/DejaVuSans.ttf",
+        os.path.expanduser("~/.local/share/fonts/NotoSans-Regular.ttf"),
+        os.path.expanduser("~/.local/share/fonts/DejaVuSans.ttf"),
+        os.path.expanduser("~/.fonts/NotoSans-Regular.ttf"),
+        os.path.expanduser("~/.fonts/DejaVuSans.ttf"),
+        # PortMaster fonts are a last-resort fallback.
         "/opt/system/Tools/PortMaster/themes/default.ttf",
         "/opt/system/Tools/PortMaster/themes/ThemeDefault.ttf",
         "/opt/tools/PortMaster/themes/default.ttf",
         "/roms/ports/PortMaster/themes/default.ttf",
-        os.path.expanduser("~/.local/share/fonts/DejaVuSans.ttf"),
-        os.path.expanduser("~/.fonts/DejaVuSans.ttf"),
     ]
+    seen = set()
     for path in candidates:
-        if path and os.path.isfile(path) and os.access(path, os.R_OK):
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if os.path.isfile(path) and os.access(path, os.R_OK):
             return path
-    try:
-        out = subprocess.check_output(
-            ["fc-match", "-f", "%{file}", "DejaVu Sans"],
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        ).decode("utf-8", "replace").strip()
-        if out and os.path.isfile(out) and os.access(out, os.R_OK):
-            return out
-    except Exception:
-        pass
+
+    # fc-match is optional on minimal handheld images.
+    for family in ("Noto Sans", "DejaVu Sans", "Liberation Sans"):
+        try:
+            out = subprocess.check_output(
+                ["fc-match", "-f", "%{file}", family],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).decode("utf-8", "replace").strip()
+            if out and os.path.isfile(out) and os.access(out, os.R_OK):
+                return out
+        except Exception:
+            pass
     return None
 
 
@@ -70,8 +86,7 @@ class _UIFontLoader(importlib.abc.Loader):
             raise ImportError("cannot load ui.py")
         loader.exec_module(module)
 
-        # Patch only the font lookup. The rest of the UI/rendering code stays
-        # untouched, so this is safe across future PilasTube UI changes.
+        # Patch only font lookup. The rest of the UI remains untouched.
         if _FONT:
             def _find_font(self):
                 return _FONT
@@ -91,7 +106,6 @@ class _UIFontFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname != "ui":
             return None
-        # Bypass this finder while resolving the real ui.py.
         try:
             sys.meta_path.remove(self)
             spec = importlib.machinery.PathFinder.find_spec(fullname, path)
